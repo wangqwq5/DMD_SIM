@@ -34,7 +34,7 @@ from PyQt5.QtGui import QFont
 # ================================================================
 # Config
 # ================================================================
-VERSION = 'v0.2'
+VERSION = 'v0.4'
 
 
 class Config:
@@ -816,8 +816,9 @@ class Tab3View(QWidget):
         self._draw_dmd()
         self._draw_bitmap()
         if self._tab4 is not None:
+            # 传入最后一次曝光位置（scan_pos 已被 _step 递增，减 1 得实际曝光位置）
             self._tab4.refresh(self.substrate_exp, self._start_x, self._start_y,
-                               self.scan_pos, self._last_states,
+                               self.scan_pos - 1, self._last_states,
                                frame_y0_before, self._mode)
         self._update_status(
             f'前进一帧  scan_y={self.scan_pos:.0f}pw  '
@@ -1107,15 +1108,15 @@ class Tab4View(QWidget):
             ax.add_patch(poly)
 
         # DMD 投影覆盖：
-        #   持续出光 — 始终显示当前帧轮廓（固定在 frame_y0 位置）
-        #   TTL 模式 — 仅在换图瞬间（dy==0）显示帧轮廓
+        #   持续出光 — 随扫描位置向上移动（显示在 scan_pos 处）
+        #   TTL 模式 — 仅在换图瞬间（dy==0）显示帧轮廓（显示在 frame_y0 处）
         show_dmd = (mode == 'continuous') or (dy == 0)
         if show_dmd:
+            green_y = s if mode == 'continuous' else frame_y0
             for r in range(self.cfg.DMD_ROWS):
                 for c in range(self.cfg.DMD_COLS):
-                    xr, yr = self.geom.pos(c, r)
                     on = last_states[r, c] > 0.5
-                    corners = self.geom.mirror_corners(c, r) + np.array([start_x, frame_y0])
+                    corners = self.geom.mirror_corners(c, r) + np.array([start_x, green_y])
                     poly = plt.Polygon(corners, closed=True,
                                        fc='#44ff8840' if on else 'none',
                                        ec='#44ff88'   if on else '#2d4a6a',
