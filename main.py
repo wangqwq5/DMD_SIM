@@ -604,6 +604,7 @@ class Tab3View(QWidget):
         self._history: list = []          # 用于后退一步
         self._mode: str = 'continuous'    # 'continuous' 或 'ttl'
         self._batch: bool = False         # 批量步进时抑制中间重绘
+        self._initialized: bool = False   # 首次前进前先展示帧0采样
 
         # 预计算 DMD 空间范围（本地坐标）
         self._xmin, self._xmax = self.geom.x_range()
@@ -658,13 +659,13 @@ class Tab3View(QWidget):
         self.substrate_exp = {}
         self._last_states = np.zeros((self.cfg.DMD_ROWS, self.cfg.DMD_COLS))
         self._history.clear()
+        self._initialized = False
         self._draw_dmd()
         self._draw_bitmap()
         if self._tab4 is not None:
-            _, _, M = self.get_params()
             self._tab4.refresh(self.substrate_exp, self._start_x, self._start_y,
                                self.scan_pos, self._last_states,
-                               self._start_y, self._mode, max(M, 1))
+                               self._start_y, self._mode)
         self._update_status(
             f'已重置  起始 x={self._start_x:.1f}  y={self._start_y:.1f} pw')
 
@@ -733,7 +734,7 @@ class Tab3View(QWidget):
             if self._tab4 is not None:
                 self._tab4.refresh(self.substrate_exp, self._start_x, self._start_y,
                                    self.scan_pos, self._last_states,
-                                   frame_y0, self._mode, M)
+                                   frame_y0, self._mode)
 
         self.scan_pos += 1.0
         if not self._batch:
@@ -767,14 +768,42 @@ class Tab3View(QWidget):
             fy0 = self._start_y + fi * M
             self._tab4.refresh(self.substrate_exp, self._start_x, self._start_y,
                                self.scan_pos, self._last_states,
-                               fy0, self._mode, M)
+                               fy0, self._mode)
         self._update_status(f'后退  scan_y={self.scan_pos:.0f}pw')
 
     def _step_frame(self):
-        """前进一帧（M 个 pw），批量执行不中间重绘。"""
+        """前进一帧（M 个 pw），批量执行不中间重绘。
+        首次调用仅加载帧0采样点显示，不曝光不前进（scan_y=0）。"""
         _, _, M = self.get_params()
         M = max(M, 1)
         sz = self.cfg.BITMAP_SIZE
+
+        # 首次点击：加载帧0采样，只显示，不曝光不前进
+        if not self._initialized:
+            self._initialized = True
+            frame_y0 = self._start_y
+            states = np.zeros((self.cfg.DMD_ROWS, self.cfg.DMD_COLS), dtype=np.float32)
+            for r in range(self.cfg.DMD_ROWS):
+                for c in range(self.cfg.DMD_COLS):
+                    xr, yr = self.geom.pos(c, r)
+                    bx = int(round(xr + self._start_x)) % sz
+                    by = int(round(frame_y0 + yr)) % sz
+                    states[r, c] = self.bmp[by, bx]
+            self._last_states = states
+            self._prev_frame_idx = 0
+            self._draw_dmd()
+            self._draw_bitmap()
+            if self._tab4 is not None:
+                self._tab4.refresh(self.substrate_exp, self._start_x, self._start_y,
+                                   self.scan_pos, self._last_states,
+                                   frame_y0, self._mode)
+            self._update_status(
+                f'帧0已加载  scan_y=0pw  '
+                f'ON镜={int(states.sum())}/{self.cfg.DMD_ROWS * self.cfg.DMD_COLS}')
+            return
+
+        # 后续点击：批量步进 M 个 pw 并曝光
+        frame_y0_before = self.scan_pos
         self._batch = True
         for _ in range(M):
             if self.scan_pos >= self._start_y + sz:
@@ -784,11 +813,9 @@ class Tab3View(QWidget):
         self._draw_dmd()
         self._draw_bitmap()
         if self._tab4 is not None:
-            fi = int((self.scan_pos - self._start_y) / M) if M > 0 else 0
-            fy0 = self._start_y + fi * M
             self._tab4.refresh(self.substrate_exp, self._start_x, self._start_y,
                                self.scan_pos, self._last_states,
-                               fy0, self._mode, M)
+                               frame_y0_before, self._mode)
         self._update_status(
             f'前进一帧  scan_y={self.scan_pos:.0f}pw  '
             f'ON镜={int(self._last_states.sum())}/{self.cfg.DMD_ROWS * self.cfg.DMD_COLS}')
@@ -821,7 +848,7 @@ class Tab3View(QWidget):
             fy0 = self._start_y + fi * M
             self._tab4.refresh(self.substrate_exp, self._start_x, self._start_y,
                                self.scan_pos, self._last_states,
-                               fy0, self._mode, M)
+                               fy0, self._mode)
         self._update_status(f'后退一帧  scan_y={self.scan_pos:.0f}pw')
 
     def toggle_mode(self) -> str:
@@ -1047,7 +1074,7 @@ class Tab4View(QWidget):
         self.canvas.draw()
 
     def refresh(self, substrate_exp, start_x, start_y, scan_pos, last_states,
-                frame_y0, mode, M=1):
+                frame_y0, mode):
         N    = self.cfg.N
         s    = scan_pos
         dy   = s - frame_y0          # 当前帧内已走步数（0 = 刚换图）
@@ -1075,34 +1102,15 @@ class Tab4View(QWidget):
             ax.add_patch(poly)
 
         # DMD 投影覆盖：
-        #   TTL 模式  — 仅在换图瞬间（dy==0）显示单帧轮廓
-        #   持续出光  — 始终显示完整 M-pw 宽度的绿色拖影（固定不变）
+        #   持续出光 — 始终显示当前帧轮廓（固定在 frame_y0 位置）
+        #   TTL 模式 — 仅在换图瞬间（dy==0）显示帧轮廓
         show_dmd = (mode == 'continuous') or (dy == 0)
         if show_dmd:
             for r in range(self.cfg.DMD_ROWS):
                 for c in range(self.cfg.DMD_COLS):
                     xr, yr = self.geom.pos(c, r)
                     on = last_states[r, c] > 0.5
-                    center_bot = np.array([xr + start_x, frame_y0 + yr])
-                    if mode == 'continuous':
-                        # 持续出光：绿色区域固定覆盖整帧 M pw，不随步进变化
-                        green_dy = max(M - 1, 0)
-                        if green_dy > 0:
-                            shift = np.array([0.0, float(green_dy)])
-                            corn = np.array([
-                                -hc - hr,
-                                 hc - hr,
-                                 hc - hr + shift,
-                                 hc + hr + shift,
-                                -hc + hr + shift,
-                                -hc + hr,
-                            ])
-                            corners = center_bot + corn
-                        else:
-                            corners = self.geom.mirror_corners(c, r) + np.array([start_x, frame_y0])
-                    else:
-                        # TTL 模式：换图瞬间显示单帧轮廓（dy==0 时调用）
-                        corners = self.geom.mirror_corners(c, r) + np.array([start_x, frame_y0])
+                    corners = self.geom.mirror_corners(c, r) + np.array([start_x, frame_y0])
                     poly = plt.Polygon(corners, closed=True,
                                        fc='#44ff8840' if on else 'none',
                                        ec='#44ff88'   if on else '#2d4a6a',
