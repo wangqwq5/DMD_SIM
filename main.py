@@ -34,6 +34,9 @@ from PyQt5.QtGui import QFont
 # ================================================================
 # Config
 # ================================================================
+VERSION = 'v0.2'
+
+
 class Config:
     DMD_ROWS: int = 6
     DMD_COLS: int = 9
@@ -861,7 +864,8 @@ class Tab3View(QWidget):
         _, lw, M = self.get_params()
         sz = self.cfg.BITMAP_SIZE
         s  = self.scan_pos
-        frame_idx = int((s - self._start_y) / M) if M > 0 else 0
+        # 使用已实际加载的帧索引，而非从 scan_pos 重算（避免批量步进后错位）
+        frame_idx = max(self._prev_frame_idx, 0)
         frame_y0  = self._start_y + frame_idx * M
 
         xmin, xmax = self._xmin + self._start_x, self._xmax + self._start_x
@@ -927,7 +931,8 @@ class Tab3View(QWidget):
         _, lw, M = self.get_params()
         sz = self.cfg.BITMAP_SIZE
         s  = self.scan_pos
-        frame_idx = int((s - self._start_y) / M) if M > 0 else 0
+        # 与 _draw_dmd 保持一致：使用已加载帧的索引
+        frame_idx = max(self._prev_frame_idx, 0)
         frame_y0  = self._start_y + frame_idx * M
 
         xmin = self._xmin + self._start_x
@@ -1166,6 +1171,11 @@ class ParamPanel(QWidget):
         title.setStyleSheet('color:#93c5fd; font-size:16pt;')
         vlay.addWidget(title)
 
+        ver_lbl = QLabel(VERSION)
+        ver_lbl.setAlignment(Qt.AlignCenter)
+        ver_lbl.setStyleSheet('color:#475569; font-size:10pt;')
+        vlay.addWidget(ver_lbl)
+
         sep = QFrame(); sep.setFrameShape(QFrame.HLine)
         sep.setStyleSheet('color:#444')
         vlay.addWidget(sep)
@@ -1229,7 +1239,7 @@ class MainWindow(QMainWindow):
         self.geom = DMDGeometry(self.cfg)
         self.pg   = PatternGen(self.cfg)
 
-        self.setWindowTitle('DMD 扫描曝光仿真演示  v0.1-demo')
+        self.setWindowTitle(f'DMD 扫描曝光仿真演示  {VERSION}')
         self.resize(1400, 860)
         self.setStyleSheet("""
             QMainWindow, QWidget   { background:#080c14; color:#cbd5e1; }
