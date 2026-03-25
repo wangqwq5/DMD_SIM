@@ -42,12 +42,23 @@ class Config:
     DMD_COLS: int = 9
     N: int = 3
     L: float = 1.0
-    PW: float = L / math.sqrt(N ** 2 + 1)
     DEFAULT_PATTERN: str = '横线'
     DEFAULT_LINE_WIDTH_PW: int = 3
     DEFAULT_M: int = 3
-    BITMAP_SIZE: int = 60
     TIMER_MS: int = 120
+
+    @property
+    def PW(self) -> float:
+        return self.L / math.sqrt(self.N ** 2 + 1)
+
+    @property
+    def BITMAP_SIZE(self) -> int:
+        span_x = self.N * (self.DMD_COLS - 1) + (self.DMD_ROWS - 1)
+        span_y = (self.DMD_COLS - 1) + self.N * (self.DMD_ROWS - 1)
+        period = self.N * self.N + 1          # 曝光纵向子像素周期 (pw)
+        sz_x = span_x + 2 * self.N + 10      # x: 覆盖 DMD x 跨度
+        sz_y = span_y + period * 5 + 10      # y: DMD y 跨度 + 5 个完整曝光周期
+        return min(max(60, sz_x, sz_y), 500) # 上限 500 保证响应性能
 
 
 # ================================================================
@@ -101,7 +112,7 @@ class PatternGen:
     def __init__(self, cfg: Config):
         self.cfg = cfg
 
-    def generate(self, pattern: str, line_width_pw: int) -> np.ndarray:
+    def generate(self, pattern: str, line_width_pw: int, angle: int = 45) -> np.ndarray:
         sz = self.cfg.BITMAP_SIZE
         bmp = np.zeros((sz, sz), dtype=np.float32)
         w = max(1, int(line_width_pw))
@@ -120,6 +131,11 @@ class PatternGen:
             yy, xx = np.mgrid[0:sz, 0:sz]
             r = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
             bmp = ((r % period) < w).astype(np.float32)
+        elif pattern == '斜线':
+            theta = math.radians(angle)
+            yy, xx = np.mgrid[0:sz, 0:sz]
+            d = yy * math.cos(theta) - xx * math.sin(theta)
+            bmp = ((d % period) < w).astype(np.float32)
 
         return bmp
 
@@ -343,7 +359,7 @@ class Tab1View(QWidget):
         for xv in x_vals_sorted:
             ax.axvline(xv, color=color_of[xv], alpha=0.18, lw=1.0, linestyle='--')
 
-        ax.set_title('6×9 DMD 阵列    数字 = x (cross-scan, pw)    同色 = 同竖直列',
+        ax.set_title(f'{self.cfg.DMD_ROWS}×{self.cfg.DMD_COLS} DMD 阵列    数字 = x (cross-scan, pw)    同色 = 同竖直列',
                      fontsize=15, color='#e2e8f0', pad=8)
         ax.set_xlabel('x  (cross-scan, pw)', color='#94a3b8', fontsize=13)
         ax.set_ylabel('y  (scan 方向, pw)',   color='#94a3b8', fontsize=13)
@@ -414,6 +430,10 @@ class Tab1View(QWidget):
         self._arr_draw_cid = fig.canvas.mpl_connect('draw_event', _update_fs)
         self.cv_array.draw()
 
+    def refresh(self):
+        self._draw_tilt()
+        self._draw_array()
+
 
 # ================================================================
 # 界面 2：Bitmap 预览（右键拖拽可在 x/y 方向移动 DMD）
@@ -429,6 +449,7 @@ class Tab2View(QWidget):
         self._dmd_y0: float = 0.0   # DMD 在 bitmap 中的 y 偏移（scan）
         self._cur_pattern: str = cfg.DEFAULT_PATTERN
         self._cur_lw: int = cfg.DEFAULT_LINE_WIDTH_PW
+        self._cur_angle: int = 45
 
         self._rdrag_start_x: float = None
         self._rdrag_start_y: float = None
@@ -495,9 +516,10 @@ class Tab2View(QWidget):
         return self._dmd_y0
 
     # ---- 刷新（外部：点击应用按钮） ----
-    def refresh(self, pattern: str, lw: int):
+    def refresh(self, pattern: str, lw: int, angle: int = 45):
         self._cur_pattern = pattern
         self._cur_lw      = lw
+        self._cur_angle   = angle
         self._dmd_x0      = 0.0
         self._dmd_y0      = 0.0
         self._redraw()
@@ -505,7 +527,7 @@ class Tab2View(QWidget):
     def _redraw(self):
         pattern = self._cur_pattern
         lw      = self._cur_lw
-        bmp = self.pg.generate(pattern, lw)
+        bmp = self.pg.generate(pattern, lw, self._cur_angle)
         sz  = self.cfg.BITMAP_SIZE
         dx  = self._dmd_x0
         dy  = self._dmd_y0
@@ -547,9 +569,8 @@ class Tab2View(QWidget):
                 # 实心点：镜面中心实际位置
                 ax.plot(xr + dx, yr + dy, 'o',
                         color='#fbbf24' if on else '#60a5fa', ms=2.5, zorder=5)
-                # 空心十字：采样的像素中心（round后坐标）
-                sx, sy = round(xr + dx), round(yr + dy)
-                ax.plot(sx, sy, '+',
+                # 空心十字：采样的像素中心（取模后实际 bitmap 坐标）
+                ax.plot(bx, by, '+',
                         color='#fbbf24' if on else '#60a5fa',
                         ms=4, markeredgewidth=0.8, zorder=6)
 
@@ -564,7 +585,8 @@ class Tab2View(QWidget):
 
         # 标题提示操作方式
         axis_hint = '→水平拖拽调x  ↕竖直拖拽调y'
-        ax.set_title(f'Bitmap · {pattern}  线宽={lw}pw  '
+        angle_info = f'  角度={self._cur_angle}°' if pattern == '斜线' else ''
+        ax.set_title(f'Bitmap · {pattern}{angle_info}  线宽={lw}pw  '
                      f'DMD偏移 x={dx:.1f} y={dy:.1f} pw    【右键{axis_hint}】',
                      fontsize=11, color='#e2e8f0', pad=8)
         ax.set_xlabel('x  (cross-scan, pw)', color='#94a3b8', fontsize=13)
@@ -655,12 +677,14 @@ class Tab3View(QWidget):
         self._start_y  = float(self.get_dmd_start_y()) if self.get_dmd_start_y else 0.0
         self.scan_pos  = self._start_y
         self._prev_frame_idx = -1
-        pattern, lw, _ = self.get_params()
-        self.bmp = self.pg.generate(pattern, lw)
+        pattern, lw, _, angle = self.get_params()
+        self.bmp = self.pg.generate(pattern, lw, angle)
         sz = self.cfg.BITMAP_SIZE
         self.exposure     = np.zeros((sz, sz), dtype=np.int32)
         self.substrate_exp = {}
         self._last_states = np.zeros((self.cfg.DMD_ROWS, self.cfg.DMD_COLS))
+        self._xmin, self._xmax = self.geom.x_range()
+        self._ymin, self._ymax = self.geom.y_range()
         self._history.clear()
         self._initialized = False
         self._draw_dmd()
@@ -681,7 +705,7 @@ class Tab3View(QWidget):
         self._update_status(f'暂停  scan_y={self.scan_pos:.1f}pw')
 
     def _step(self):
-        _, lw, M = self.get_params()
+        _, lw, M, _ = self.get_params()
         s  = self.scan_pos
         sz = self.cfg.BITMAP_SIZE
 
@@ -765,7 +789,7 @@ class Tab3View(QWidget):
         self._draw_dmd()
         self._draw_bitmap()
         if self._tab4 is not None:
-            _, _, M = self.get_params()
+            _, _, M, _ = self.get_params()
             M = max(M, 1)
             fi = int((self.scan_pos - self._start_y) / M)
             fy0 = self._start_y + fi * M
@@ -777,7 +801,7 @@ class Tab3View(QWidget):
     def _step_frame(self):
         """前进一帧（M 个 pw），批量执行不中间重绘。
         首次调用仅加载帧0采样点显示，不曝光不前进（scan_y=0）。"""
-        _, _, M = self.get_params()
+        _, _, M, _ = self.get_params()
         M = max(M, 1)
         sz = self.cfg.BITMAP_SIZE
 
@@ -830,7 +854,7 @@ class Tab3View(QWidget):
             self._update_status('已是最初状态，无法后退')
             return
         self.timer.stop()
-        _, _, M = self.get_params()
+        _, _, M, _ = self.get_params()
         M = max(M, 1)
         snap = None
         for _ in range(M):
@@ -862,7 +886,7 @@ class Tab3View(QWidget):
 
     # ---- DMD 采样面板（仅显示 DMD 覆盖区） ----
     def _draw_dmd(self):
-        _, lw, M = self.get_params()
+        _, lw, M, _ = self.get_params()
         sz = self.cfg.BITMAP_SIZE
         s  = self.scan_pos
         # 使用已实际加载的帧索引，而非从 scan_pos 重算（避免批量步进后错位）
@@ -929,7 +953,7 @@ class Tab3View(QWidget):
 
     # ---- Bitmap 采样面板（与左侧 DMD 状态对应，高亮当前被采样像素） ----
     def _draw_bitmap(self):
-        _, lw, M = self.get_params()
+        _, lw, M, _ = self.get_params()
         sz = self.cfg.BITMAP_SIZE
         s  = self.scan_pos
         # 与 _draw_dmd 保持一致：使用已加载帧的索引
@@ -971,12 +995,11 @@ class Tab3View(QWidget):
                         color='#fbbf24' if on else '#60a5fa',
                         ms=7, markeredgewidth=1.5, zorder=5)
 
-        # 与左侧 DMD 面板保持相同 xlim/ylim，方便对照
-        ax.set_xlim(xmin - margin, xmax + margin)
-        ax.set_ylim(frame_y0 + ymin - margin, frame_y0 + ymax + margin)
+        # 显示完整 bitmap，确保取模后的采样点始终可见
+        ax.set_xlim(-0.5, sz - 0.5)
+        ax.set_ylim(-0.5, sz - 0.5)
         ax.set_aspect('equal')
-        _pw_grid(ax, xmin - margin, xmax + margin,
-                 frame_y0 + ymin - margin, frame_y0 + ymax + margin,
+        _pw_grid(ax, -0.5, sz - 0.5, -0.5, sz - 0.5,
                  color='#2d5080', lw=0.55, alpha=0.7)
 
         from matplotlib.patches import Patch
@@ -1081,6 +1104,8 @@ class Tab4View(QWidget):
 
     def refresh(self, substrate_exp, start_x, start_y, scan_pos, last_states,
                 frame_y0, mode):
+        self._xmin, self._xmax = self.geom.x_range()
+        self._ymin, self._ymax = self.geom.y_range()
         N    = self.cfg.N
         s    = scan_pos
         dy   = s - frame_y0          # 当前帧内已走步数（0 = 刚换图）
@@ -1184,25 +1209,56 @@ class ParamPanel(QWidget):
         def lbl(s):
             l = QLabel(s); l.setStyleSheet('color:#ccc; font-size:13pt;'); return l
 
-        grp_dmd = QGroupBox('DMD 规格（固定）')
+        grp_dmd = QGroupBox('DMD 规格（可调）')
         fl = QFormLayout(); fl.setSpacing(4)
-        fl.addRow(lbl('行 × 列 :'),       lbl(f'{self.cfg.DMD_ROWS} × {self.cfg.DMD_COLS}'))
-        fl.addRow(lbl('倾斜因子 N :'),     lbl(str(self.cfg.N)))
-        fl.addRow(lbl('微镜边长 l :'),     lbl('1.0 (单位)'))
-        fl.addRow(lbl('pw = l/√(N²+1) :'), lbl(f'{self.cfg.PW:.5f}'))
+
+        self.spin_rows = QSpinBox()
+        self.spin_rows.setRange(2, 30)
+        self.spin_rows.setValue(self.cfg.DMD_ROWS)
+        fl.addRow(lbl('行数 :'), self.spin_rows)
+
+        self.spin_cols = QSpinBox()
+        self.spin_cols.setRange(2, 30)
+        self.spin_cols.setValue(self.cfg.DMD_COLS)
+        fl.addRow(lbl('列数 :'), self.spin_cols)
+
+        self.spin_N = QSpinBox()
+        self.spin_N.setRange(1, 15)
+        self.spin_N.setValue(self.cfg.N)
+        fl.addRow(lbl('倾斜因子 N :'), self.spin_N)
+
+        fl.addRow(lbl('微镜边长 l :'), lbl('1.0 (单位)'))
+        self.lbl_pw = QLabel(f'{self.cfg.PW:.5f}')
+        self.lbl_pw.setStyleSheet('color:#ccc; font-size:13pt;')
+        fl.addRow(lbl('pw = l/√(N²+1) :'), self.lbl_pw)
+
+        self.spin_N.valueChanged.connect(self._on_N_changed)
+
         grp_dmd.setLayout(fl)
         vlay.addWidget(grp_dmd)
 
         grp_pat = QGroupBox('图形设置')
         fl2 = QFormLayout(); fl2.setSpacing(4)
         self.combo = QComboBox()
-        self.combo.addItems(['横线', '竖线', '圆环'])
+        self.combo.addItems(['横线', '竖线', '圆环', '斜线'])
         fl2.addRow(lbl('类型 :'), self.combo)
         self.spin_lw = QSpinBox()
         self.spin_lw.setRange(1, 20)
         self.spin_lw.setValue(self.cfg.DEFAULT_LINE_WIDTH_PW)
         self.spin_lw.setSuffix(' pw')
         fl2.addRow(lbl('线宽 :'), self.spin_lw)
+
+        self._angle_label = lbl('斜线角度 :')
+        self.spin_angle = QSpinBox()
+        self.spin_angle.setRange(1, 89)
+        self.spin_angle.setValue(45)
+        self.spin_angle.setSuffix(' °')
+        fl2.addRow(self._angle_label, self.spin_angle)
+        self._angle_label.setVisible(False)
+        self.spin_angle.setVisible(False)
+
+        self.combo.currentTextChanged.connect(self._on_pattern_changed)
+
         grp_pat.setLayout(fl2)
         vlay.addWidget(grp_pat)
 
@@ -1226,8 +1282,21 @@ class ParamPanel(QWidget):
         vlay.addWidget(btn)
         vlay.addStretch()
 
+    def _on_N_changed(self, val: int):
+        pw = 1.0 / math.sqrt(val ** 2 + 1)
+        self.lbl_pw.setText(f'{pw:.5f}')
+
+    def _on_pattern_changed(self, text: str):
+        is_slash = (text == '斜线')
+        self._angle_label.setVisible(is_slash)
+        self.spin_angle.setVisible(is_slash)
+
     def get_params(self):
-        return self.combo.currentText(), self.spin_lw.value(), self.spin_M.value()
+        return (self.combo.currentText(), self.spin_lw.value(),
+                self.spin_M.value(), self.spin_angle.value())
+
+    def get_dmd_params(self):
+        return self.spin_rows.value(), self.spin_cols.value(), self.spin_N.value()
 
 
 # ================================================================
@@ -1268,8 +1337,8 @@ class MainWindow(QMainWindow):
         """)
 
         self._build_ui()
-        p, lw, _ = self.param_panel.get_params()
-        self.tab2.refresh(p, lw)
+        p, lw, _, angle = self.param_panel.get_params()
+        self.tab2.refresh(p, lw, angle)
 
     def _build_ui(self):
         central = QWidget()
@@ -1314,8 +1383,13 @@ class MainWindow(QMainWindow):
         return self.param_panel.get_params()
 
     def _on_apply(self):
-        p, lw, _ = self.param_panel.get_params()
-        self.tab2.refresh(p, lw)
+        rows, cols, N = self.param_panel.get_dmd_params()
+        p, lw, _, angle = self.param_panel.get_params()
+        self.cfg.DMD_ROWS = rows
+        self.cfg.DMD_COLS = cols
+        self.cfg.N = N
+        self.tab1.refresh()
+        self.tab2.refresh(p, lw, angle)
         self.tab3.reset()
 
 
